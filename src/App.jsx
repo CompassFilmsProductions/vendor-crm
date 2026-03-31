@@ -723,7 +723,7 @@ export default function App(){
   const [showCsv,setShowCsv]=useState(false);
   const [csvInput,setCsvInput]=useState("");
   const [showXlsx,setShowXlsx]=useState(false);
-  const [showAudit,setShowAudit]=useState(false);
+  const [showBackupReminder,setShowBackupReminder]=useState(false);
   const [dupWarning,setDupWarning]=useState(null);
   const [selectedIds,setSelectedIds]=useState(new Set());
   const [bulkAction,setBulkAction]=useState("");
@@ -745,7 +745,18 @@ export default function App(){
     }).catch(()=>setDbLoading(false));
   },[]);
 
-  // Auto-save to Supabase whenever vendors change
+  // Weekly backup reminder
+  useEffect(()=>{
+    if(dbLoading) return;
+    const lastBackup=localStorage.getItem("lastBackupReminder");
+    const now=Date.now();
+    const oneWeek=7*24*60*60*1000;
+    if(!lastBackup||now-parseInt(lastBackup)>oneWeek){
+      setTimeout(()=>{
+        setShowBackupReminder(true);
+      },5000);
+    }
+  },[dbLoading]);
   useEffect(()=>{
     if(dbLoading) return;
     setSaveStatus("saving");
@@ -1110,6 +1121,13 @@ export default function App(){
                 <div style={{fontSize:11,color:subText,marginBottom:2}}>Meeting Date & Time</div>
                 <input type="datetime-local" value={toDateInput(editing.meetingDate)} onChange={e=>setEditing(ev=>({...ev,meetingDate:e.target.value?new Date(e.target.value).toISOString():null}))} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,boxSizing:"border-box",background:bg,color:textCol}}/>
               </div>}
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:11,color:subText,marginBottom:2}}>Region</div>
+                <select value={editing.region||activeRegion} onChange={e=>setEditing(ev=>({...ev,region:e.target.value}))} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>
+                  {REGIONS.map(r=>{const rc=REGION_COLORS[r];return <option key={r} value={r}>{r}</option>;})}
+                </select>
+                {editing.region&&editing.region!==selected?.region&&<div style={{fontSize:11,color:"#d97706",marginTop:4}}>⚠️ This will move the vendor to {editing.region}</div>}
+              </div>
               <Field label="Website Needed" value={editing.websiteNeeded} edit options={["Yes","No"]} onChange={val=>setEditing(e=>({...e,websiteNeeded:val}))}/>
               <Field label="Notes" value={editing.notes} edit type="textarea" onChange={val=>setEditing(e=>({...e,notes:val}))}/>
               <div style={{display:"flex",gap:8,marginTop:12}}>
@@ -1200,6 +1218,17 @@ export default function App(){
 
       {showAudit&&<AuditModal vendors={vendors} onClose={()=>setShowAudit(false)} onApply={handleAuditApply} darkMode={darkMode} cardBg={cardBg} borderCol={borderCol} textCol={textCol} subText={subText}/>}
       {showXlsx&&<XlsxModal onClose={()=>setShowXlsx(false)} onImport={handleImport} darkMode={darkMode} cardBg={cardBg} borderCol={borderCol} textCol={textCol} subText={subText} bg={bg}/>}
+      {showBackupReminder&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:16}}>
+        <div style={{background:cardBg,borderRadius:14,width:"100%",maxWidth:400,padding:28,boxShadow:"0 24px 48px rgba(0,0,0,.25)",textAlign:"center"}}>
+          <div style={{fontSize:40,marginBottom:12}}>💾</div>
+          <div style={{fontWeight:700,fontSize:17,marginBottom:8,color:textCol}}>Weekly Backup Reminder</div>
+          <div style={{fontSize:13,color:subText,marginBottom:20,lineHeight:1.6}}>It's been a week since your last backup reminder. We recommend exporting your vendor data as a CSV to keep a local copy safe.</div>
+          <div style={{display:"flex",gap:10}}>
+            <button onClick={()=>{exportCSV();localStorage.setItem("lastBackupReminder",Date.now().toString());setShowBackupReminder(false);showToast("✅ Backup exported!");}} style={{flex:1,padding:"10px 0",background:"#2563eb",color:"#fff",border:"none",borderRadius:8,fontSize:14,cursor:"pointer",fontWeight:600}}>📤 Export Now</button>
+            <button onClick={()=>{localStorage.setItem("lastBackupReminder",Date.now().toString());setShowBackupReminder(false);}} style={{flex:1,padding:"10px 0",background:darkMode?"#334155":"#f3f4f6",color:subText,border:"none",borderRadius:8,fontSize:14,cursor:"pointer"}}>Remind me later</button>
+          </div>
+        </div>
+      </div>}
     </div>
   );
 }
