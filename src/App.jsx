@@ -110,6 +110,24 @@ const fmtDate = iso => iso ? new Date(iso).toLocaleString([],{month:"short",day:
 const fmtShort = iso => iso ? new Date(iso).toLocaleDateString([],{month:"short",day:"numeric",year:"numeric"}) : "—";
 const toDateInput = iso => iso ? new Date(iso).toISOString().slice(0,16) : "";
 
+// FIX #8: prefer navigator.clipboard over deprecated execCommand
+function clipCopy(text) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => {});
+  } else {
+    try {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.style.cssText = "position:fixed;top:0;left:0;opacity:0;";
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    } catch(e) {}
+  }
+}
+
 function healthScore(v) {
   let s=0;
   const last=v.interactions?.length ? v.interactions.reduce((a,b)=>a.date>b.date?a:b) : null;
@@ -119,9 +137,7 @@ function healthScore(v) {
   if(v.vendorStatus==="Commission Partner")s+=30;else if(v.vendorStatus==="Preferred Vendor")s+=25;else if(v.vendorStatus==="In Negotiation")s+=15;else if(v.vendorStatus==="Prospect")s+=10;
   return Math.min(100,s);
 }
-function clipCopy(text) {
-  try{const el=document.createElement("textarea");el.value=text;el.style.cssText="position:fixed;top:0;left:0;opacity:0;";document.body.appendChild(el);el.focus();el.select();document.execCommand("copy");document.body.removeChild(el);}catch(e){navigator.clipboard?.writeText(text);}
-}
+
 function useOutside(ref,cb) {
   useEffect(()=>{
     const h=e=>{if(ref.current&&!ref.current.contains(e.target))cb();};
@@ -175,6 +191,8 @@ function stringSim(a,b) {
   let m=0;for(let i=0;i<shorter.length;i++)if(longer.includes(shorter[i]))m++;
   return m/longer.length;
 }
+
+// Enhanced duplicate detection: name + phone + website
 function findDupes(vendors) {
   const pairs=[],seen=new Set();
   for(let i=0;i<vendors.length;i++){
@@ -184,10 +202,43 @@ function findDupes(vendors) {
       const ns=stringSim(a.organization||"",b.organization||"");
       const sp=a.phone&&b.phone&&a.phone.replace(/\D/g,"")===b.phone.replace(/\D/g,"");
       const se=a.email&&b.email&&a.email.toLowerCase()===b.email.toLowerCase();
-      if(ns>=0.85||sp||se){seen.add(key);pairs.push({a,b,reason:se?"Same email":sp?"Same phone":"Similar name ("+Math.round(ns*100)+"%)"}); }
+      // NEW: website match
+      const normalizeUrl = u => (u||"").toLowerCase().replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"").trim();
+      const aw=normalizeUrl(a.website), bw=normalizeUrl(b.website);
+      const sw=aw&&bw&&aw===bw;
+      const reasons=[];
+      if(se)reasons.push("Same email");
+      if(sp)reasons.push("Same phone");
+      if(sw)reasons.push("Same website");
+      if(ns>=0.85&&!se&&!sp&&!sw)reasons.push("Similar name ("+Math.round(ns*100)+"%)");
+      if(reasons.length>0){
+        seen.add(key);
+        pairs.push({a,b,reason:reasons.join(" · "),score:Math.max(ns,(se||sp||sw)?1:0)});
+      }
     }
   }
-  return pairs;
+  return pairs.sort((a,b)=>b.score-a.score);
+}
+
+// Find duplicates for a single new vendor against existing list
+function findDupesForVendor(newV, vendors) {
+  const results = [];
+  const normalizeUrl = u => (u||"").toLowerCase().replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"").trim();
+  for (const v of vendors) {
+    if (v.id === newV.id) continue;
+    const ns = stringSim(newV.organization||"", v.organization||"");
+    const sp = newV.phone && v.phone && newV.phone.replace(/\D/g,"") === v.phone.replace(/\D/g,"");
+    const se = newV.email && v.email && newV.email.toLowerCase() === v.email.toLowerCase();
+    const aw = normalizeUrl(newV.website), bw = normalizeUrl(v.website);
+    const sw = aw && bw && aw === bw;
+    const reasons = [];
+    if(se) reasons.push("Same email");
+    if(sp) reasons.push("Same phone");
+    if(sw) reasons.push("Same website");
+    if(ns >= 0.82 && !se && !sp && !sw) reasons.push("Similar name ("+Math.round(ns*100)+"%)");
+    if(reasons.length > 0) results.push({vendor: v, reason: reasons.join(" · "), score: Math.max(ns,(se||sp||sw)?1:0)});
+  }
+  return results.sort((a,b)=>b.score-a.score);
 }
 
 const SAMPLE = [
@@ -200,6 +251,201 @@ const SAMPLE = [
   {id:7,region:"Savannah",type:"Videography",organization:"Frame by Frame Films",contact:"",website:"",phone:"912-555-0101",social:"@framexframe",email:"films@fbfatl.com",meetingStatus:"Not Started",vendorStatus:"Prospect",websiteNeeded:"Yes",notes:"",partnership:"No",interactions:[],meetingDate:null,tasks:[],tags:[],statusHistory:[]},
   {id:8,region:"Savannah",type:"Décor",organization:"Elegant Touches",contact:"Monique Reyes",website:"eleganttouches.net",phone:"912-555-0234",social:"@eleganttouches",email:"info@eleganttouches.net",meetingStatus:"Scheduled",vendorStatus:"In Negotiation",websiteNeeded:"No",notes:"Referral from Southern Bites.",partnership:"No",interactions:[{id:1,type:"social",date:new Date(Date.now()-32*86400000).toISOString()}],meetingDate:new Date(Date.now()+3*86400000).toISOString(),tasks:[{id:1,text:"Review contract terms",done:false,due:null}],tags:["Décor"],statusHistory:[{status:"In Negotiation",date:new Date(Date.now()-5*86400000).toISOString()}]},
 ];
+
+// ─── AI Website Autofill ───────────────────────────────────────────────────────
+async function autofillFromWebsite(url) {
+  const cleanUrl = url.startsWith("http") ? url : "https://" + url;
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      messages: [{
+        role: "user",
+        content: `Visit this website and extract business information: ${cleanUrl}
+
+Also search for "${cleanUrl}" to find any additional contact info.
+
+Reply ONLY with a JSON object (no markdown, no explanation):
+{
+  "organization": "Business name",
+  "contact": "Contact person name or empty string",
+  "type": "Business category/type (e.g. Catering, Photography, Florist, DJ/Music, Venue, Décor, Videography, etc.)",
+  "phone": "Phone number or empty string",
+  "email": "Email address or empty string",
+  "social": "Primary social handle (e.g. @handle) or empty string",
+  "notes": "One sentence description of business or empty string",
+  "websiteNeeded": "No"
+}
+
+Only include fields you are confident about. Use empty strings for unknown fields.`
+      }]
+    })
+  });
+  const data = await response.json();
+  // Extract text from response (may include tool_use blocks)
+  const textBlock = data.content?.find(b => b.type === "text");
+  if (!textBlock) throw new Error("No text response from AI");
+  const raw = textBlock.text.replace(/```json|```/g, "").trim();
+  // Find JSON object in response
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("Could not parse AI response");
+  return JSON.parse(match[0]);
+}
+
+// ─── Duplicate Resolution Modal ───────────────────────────────────────────────
+function DuplicateResolutionModal({ newVendor, duplicates, onKeepNew, onKeepExisting, onCancel, darkMode, cardBg, borderCol, textCol, subText }) {
+  const [selected, setSelected] = useState(null); // null = keep new, id = keep that existing
+  const [step, setStep] = useState("choose"); // "choose" | "confirm"
+
+  const chosenVendor = selected === null ? newVendor : duplicates.find(d => d.vendor.id === selected)?.vendor;
+
+  function handleConfirm() {
+    if (selected === null) {
+      onKeepNew();
+    } else {
+      onKeepExisting(selected);
+    }
+  }
+
+  const fieldRows = ["organization","contact","type","phone","email","website","social","meetingStatus","vendorStatus","notes"];
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16}}>
+      <div style={{background:cardBg,borderRadius:14,width:"100%",maxWidth:680,maxHeight:"92vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 60px rgba(0,0,0,.35)"}}>
+        {/* Header */}
+        <div style={{padding:"16px 20px",borderBottom:"1px solid "+borderCol,flexShrink:0}}>
+          <div style={{fontWeight:700,fontSize:16,color:"#b91c1c"}}>⚠️ Duplicate Vendor Detected</div>
+          <div style={{fontSize:12,color:subText,marginTop:3}}>
+            We found {duplicates.length} possible match{duplicates.length>1?"es":""} in your database. Choose which record to keep.
+          </div>
+        </div>
+
+        {/* Reason badges */}
+        <div style={{padding:"10px 20px",borderBottom:"1px solid "+borderCol,display:"flex",flexWrap:"wrap",gap:6,flexShrink:0}}>
+          {duplicates.map(d => (
+            <span key={d.vendor.id} style={{fontSize:11,fontWeight:600,padding:"2px 10px",borderRadius:9999,background:"#fee2e2",color:"#b91c1c"}}>
+              {d.vendor.organization}: {d.reason}
+            </span>
+          ))}
+        </div>
+
+        {/* Comparison grid — show new vs top duplicate */}
+        <div style={{overflowY:"auto",flex:1,padding:20}}>
+          {duplicates.map((dup, idx) => (
+            <div key={dup.vendor.id} style={{marginBottom:idx < duplicates.length - 1 ? 24 : 0}}>
+              {duplicates.length > 1 && (
+                <div style={{fontSize:11,fontWeight:700,color:subText,marginBottom:8,textTransform:"uppercase"}}>
+                  Match #{idx+1} · {dup.reason}
+                </div>
+              )}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                {/* New vendor */}
+                <div
+                  onClick={() => setSelected(null)}
+                  style={{
+                    padding:"14px 16px",
+                    borderRadius:10,
+                    border: selected===null ? "2px solid #2563eb" : "2px solid "+borderCol,
+                    background: selected===null ? (darkMode?"#1e3a5f":"#eff6ff") : (darkMode?"#1e293b":"#f9fafb"),
+                    cursor:"pointer",
+                    transition:"all .15s"
+                  }}
+                >
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                    <div style={{width:10,height:10,borderRadius:9999,background:"#2563eb",flexShrink:0}}/>
+                    <div style={{fontSize:12,fontWeight:700,color:"#2563eb"}}>New Entry</div>
+                    {selected===null && <span style={{marginLeft:"auto",fontSize:16}}>✅</span>}
+                  </div>
+                  {fieldRows.map(f => (newVendor[f] || dup.vendor[f]) ? (
+                    <div key={f} style={{marginBottom:5}}>
+                      <div style={{fontSize:10,color:subText,textTransform:"uppercase"}}>{f}</div>
+                      <div style={{
+                        fontSize:12,
+                        fontWeight: newVendor[f] !== dup.vendor[f] ? 600 : 400,
+                        color: newVendor[f] !== dup.vendor[f] ? (darkMode?"#93c5fd":"#1d4ed8") : textCol,
+                        wordBreak:"break-all"
+                      }}>
+                        {newVendor[f] || <span style={{color:"#d1d5db",fontStyle:"italic"}}>—</span>}
+                      </div>
+                    </div>
+                  ) : null)}
+                </div>
+
+                {/* Existing vendor */}
+                <div
+                  onClick={() => setSelected(dup.vendor.id)}
+                  style={{
+                    padding:"14px 16px",
+                    borderRadius:10,
+                    border: selected===dup.vendor.id ? "2px solid #059669" : "2px solid "+borderCol,
+                    background: selected===dup.vendor.id ? (darkMode?"#052e16":"#ecfdf5") : (darkMode?"#1e293b":"#f9fafb"),
+                    cursor:"pointer",
+                    transition:"all .15s"
+                  }}
+                >
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                    <div style={{width:10,height:10,borderRadius:9999,background:"#059669",flexShrink:0}}/>
+                    <div style={{fontSize:12,fontWeight:700,color:"#059669"}}>Existing Record</div>
+                    {selected===dup.vendor.id && <span style={{marginLeft:"auto",fontSize:16}}>✅</span>}
+                  </div>
+                  {fieldRows.map(f => (newVendor[f] || dup.vendor[f]) ? (
+                    <div key={f} style={{marginBottom:5}}>
+                      <div style={{fontSize:10,color:subText,textTransform:"uppercase"}}>{f}</div>
+                      <div style={{
+                        fontSize:12,
+                        fontWeight: newVendor[f] !== dup.vendor[f] ? 600 : 400,
+                        color: newVendor[f] !== dup.vendor[f] ? (darkMode?"#6ee7b7":"#065f46") : textCol,
+                        wordBreak:"break-all"
+                      }}>
+                        {dup.vendor[f] || <span style={{color:"#d1d5db",fontStyle:"italic"}}>—</span>}
+                      </div>
+                    </div>
+                  ) : null)}
+                  <div style={{marginTop:8,fontSize:11,color:subText,borderTop:"1px solid "+borderCol,paddingTop:6}}>
+                    {dup.vendor.interactions?.length||0} interactions · Added {fmtShort(dup.vendor.statusHistory?.[0]?.date)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {/* Highlighted differences legend */}
+          <div style={{marginTop:14,padding:"8px 12px",background:darkMode?"#1e293b":"#f9fafb",borderRadius:8,fontSize:11,color:subText}}>
+            <span style={{fontWeight:600,color:darkMode?"#93c5fd":"#1d4ed8"}}>Blue</span> = fields that differ in the new entry ·&nbsp;
+            <span style={{fontWeight:600,color:darkMode?"#6ee7b7":"#065f46"}}>Green</span> = fields that differ in the existing record
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{padding:"14px 20px",borderTop:"1px solid "+borderCol,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0,flexWrap:"wrap",gap:10}}>
+          <div style={{fontSize:13,color:subText}}>
+            {selected === null
+              ? "📝 Will add new entry, discard existing"
+              : "📂 Will keep existing record, discard new entry"}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={onCancel} style={{padding:"8px 16px",background:"none",border:"1px solid "+borderCol,borderRadius:8,fontSize:13,cursor:"pointer",color:textCol}}>
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirm}
+              style={{
+                padding:"8px 20px",
+                background: selected===null ? "#2563eb" : "#059669",
+                color:"#fff",border:"none",borderRadius:8,fontSize:13,cursor:"pointer",fontWeight:600
+              }}
+            >
+              {selected===null ? "✅ Keep New Entry" : "✅ Keep Existing Record"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function HealthBar({score}){
   const color=score>=70?"#22c55e":score>=40?"#f59e0b":"#ef4444";
@@ -703,18 +949,275 @@ function XlsxModal({onClose,onImport,darkMode,cardBg,borderCol,textCol,subText,b
   </div>;
 }
 
+// ─── Add Vendor Modal with AI Autofill & Duplicate Detection ──────────────────
+function AddVendorModal({ onClose, onAdd, vendors, activeRegion, darkMode, cardBg, borderCol, textCol, subText, bg }) {
+  const emptyVendor = () => ({
+    region: activeRegion,
+    type:"",organization:"",contact:"",website:"",phone:"",social:"",email:"",
+    meetingStatus:"Not Started",vendorStatus:"Prospect",websiteNeeded:"No",
+    notes:"",partnership:"No",interactions:[],meetingDate:null,tasks:[],tags:[],statusHistory:[]
+  });
+
+  const [newV, setNewV] = useState(emptyVendor());
+  const [autofillStatus, setAutofillStatus] = useState("idle"); // idle | loading | done | error
+  const [autofillMsg, setAutofillMsg] = useState("");
+  const [autofillFields, setAutofillFields] = useState(new Set()); // which fields were filled by AI
+  const [dupModal, setDupModal] = useState(null); // null | { duplicates }
+  const websiteRef = useRef(null);
+
+  function upd(field, val) {
+    setNewV(n => ({ ...n, [field]: val }));
+  }
+
+  // Trigger autofill when website field loses focus or user presses Enter, if url looks valid
+  async function triggerAutofill(url) {
+    if (!url || url.length < 4) return;
+    const cleaned = url.replace(/^https?:\/\//,"").replace(/^www\./,"").split("/")[0];
+    if (!cleaned.includes(".")) return; // not a real domain
+    setAutofillStatus("loading");
+    setAutofillMsg("🤖 Scanning website…");
+    try {
+      const result = await autofillFromWebsite(url);
+      const filled = new Set();
+      // Only fill empty fields (don't overwrite user input)
+      setNewV(prev => {
+        const updated = { ...prev };
+        for (const [key, val] of Object.entries(result)) {
+          if (val && !prev[key]) {
+            updated[key] = val;
+            filled.add(key);
+          }
+        }
+        return updated;
+      });
+      setAutofillFields(filled);
+      setAutofillStatus("done");
+      setAutofillMsg(`✅ Autofilled ${filled.size} field${filled.size !== 1 ? "s" : ""} from website`);
+    } catch(e) {
+      setAutofillStatus("error");
+      setAutofillMsg("⚠️ Couldn't scan website: " + e.message);
+    }
+  }
+
+  function handleWebsiteBlur(e) {
+    const url = e.target.value.trim();
+    if (url && autofillStatus === "idle") triggerAutofill(url);
+  }
+
+  function handleWebsiteKeyDown(e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const url = e.target.value.trim();
+      if (url) triggerAutofill(url);
+    }
+  }
+
+  function handleSubmit() {
+    if (!newV.organization.trim()) return;
+    // Check for duplicates
+    const dupes = findDupesForVendor(newV, vendors);
+    if (dupes.length > 0) {
+      setDupModal({ duplicates: dupes });
+      return;
+    }
+    commitAdd(newV);
+  }
+
+  function commitAdd(v) {
+    onAdd({ ...v, id: Date.now(), statusHistory: [{ status: v.vendorStatus, date: nowIso() }] });
+    onClose();
+  }
+
+  function handleKeepNew() {
+    commitAdd(newV);
+    setDupModal(null);
+  }
+
+  function handleKeepExisting(existingId) {
+    // Discard the new vendor — just close
+    setDupModal(null);
+    onClose();
+  }
+
+  const inputStyle = (field) => ({
+    width:"100%",
+    border: autofillFields.has(field) ? "1.5px solid #059669" : "1px solid "+borderCol,
+    borderRadius:6,
+    padding:"4px 8px",
+    fontSize:13,
+    boxSizing:"border-box",
+    background: autofillFields.has(field) ? (darkMode?"#052e16":"#f0fdf4") : bg,
+    color:textCol,
+    transition:"border-color .2s, background .2s"
+  });
+
+  const fieldLabel = (label, field) => (
+    <div style={{marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:"#9ca3af",marginBottom:2}}>
+        {label}
+        {autofillFields.has(field) && <span style={{fontSize:10,fontWeight:700,color:"#059669",background:"#dcfce7",padding:"1px 5px",borderRadius:9999}}>AI ✨</span>}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:50,padding:16}}>
+        <div style={{background:cardBg,borderRadius:12,width:"100%",maxWidth:440,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 20px 40px rgba(0,0,0,.2)"}}>
+          <div style={{padding:"14px 20px",borderBottom:"1px solid "+borderCol,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontWeight:600,fontSize:15}}>Add New Vendor</div>
+              <div style={{fontSize:11,color:subText,marginTop:1}}>Paste a website to auto-fill fields with AI ✨</div>
+            </div>
+            <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,color:subText,cursor:"pointer"}}>×</button>
+          </div>
+
+          <div style={{padding:20}}>
+            {/* Website field FIRST for autofill UX */}
+            <div style={{marginBottom:12,padding:"10px 12px",background:darkMode?"#1e293b":"#f8fafc",borderRadius:8,border:"1px solid "+borderCol}}>
+              <div style={{fontSize:11,fontWeight:700,color:subText,marginBottom:6}}>🌐 WEBSITE — paste to auto-fill</div>
+              <input
+                ref={websiteRef}
+                type="text"
+                value={newV.website}
+                onChange={e => upd("website", e.target.value)}
+                onBlur={handleWebsiteBlur}
+                onKeyDown={handleWebsiteKeyDown}
+                placeholder="e.g. tasteofatlanta.com"
+                style={{...inputStyle("website"), marginBottom:6}}
+              />
+              {autofillStatus !== "idle" && (
+                <div style={{
+                  fontSize:12,
+                  color: autofillStatus==="loading"?"#92400e":autofillStatus==="done"?"#065f46":"#b91c1c",
+                  background: autofillStatus==="loading"?"#fffbeb":autofillStatus==="done"?"#ecfdf5":"#fef2f2",
+                  padding:"5px 8px",borderRadius:6,display:"flex",alignItems:"center",gap:6
+                }}>
+                  {autofillStatus==="loading" && <span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>⏳</span>}
+                  {autofillMsg}
+                  {autofillStatus !== "loading" && (
+                    <button
+                      onClick={() => { setAutofillStatus("idle"); setAutofillMsg(""); triggerAutofill(newV.website); }}
+                      style={{marginLeft:"auto",fontSize:10,color:subText,background:"none",border:"none",cursor:"pointer"}}
+                    >
+                      Retry
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Organization */}
+            <div style={{marginBottom:8}}>
+              {fieldLabel("Organization *", "organization")}
+              <input value={newV.organization} onChange={e=>upd("organization",e.target.value)} placeholder="Business name" style={inputStyle("organization")}/>
+            </div>
+            {/* Contact */}
+            <div style={{marginBottom:8}}>
+              {fieldLabel("Contact Person","contact")}
+              <input value={newV.contact} onChange={e=>upd("contact",e.target.value)} style={inputStyle("contact")}/>
+            </div>
+            {/* Type */}
+            <div style={{marginBottom:8}}>
+              {fieldLabel("Type / Category","type")}
+              <input value={newV.type} onChange={e=>upd("type",e.target.value)} placeholder="e.g. Catering, Photography…" style={inputStyle("type")}/>
+            </div>
+            {/* Phone */}
+            <div style={{marginBottom:8}}>
+              {fieldLabel("Phone","phone")}
+              <input value={newV.phone} onChange={e=>upd("phone",e.target.value)} style={inputStyle("phone")}/>
+            </div>
+            {/* Email */}
+            <div style={{marginBottom:8}}>
+              {fieldLabel("Email","email")}
+              <input value={newV.email} onChange={e=>upd("email",e.target.value)} style={inputStyle("email")}/>
+            </div>
+            {/* Social */}
+            <div style={{marginBottom:8}}>
+              {fieldLabel("Social Account","social")}
+              <input value={newV.social} onChange={e=>upd("social",e.target.value)} style={inputStyle("social")}/>
+            </div>
+
+            {/* Statuses */}
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:11,color:"#9ca3af",marginBottom:2}}>Meeting Status</div>
+              <select value={newV.meetingStatus} onChange={e=>upd("meetingStatus",e.target.value)} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>
+                {STATUSES.meeting.map(o=><option key={o}>{o}</option>)}
+              </select>
+            </div>
+            {(newV.meetingStatus==="Scheduled"||newV.meetingStatus==="Pending")&&(
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:11,color:"#9ca3af",marginBottom:2}}>Meeting Date & Time</div>
+                <input type="datetime-local" value={toDateInput(newV.meetingDate)} onChange={e=>upd("meetingDate",e.target.value?new Date(e.target.value).toISOString():null)} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,boxSizing:"border-box",background:bg,color:textCol}}/>
+              </div>
+            )}
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:11,color:"#9ca3af",marginBottom:2}}>Vendor Status</div>
+              <select value={newV.vendorStatus} onChange={e=>upd("vendorStatus",e.target.value)} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>
+                {STATUSES.vendor.map(o=><option key={o}>{o}</option>)}
+              </select>
+            </div>
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:11,color:"#9ca3af",marginBottom:2}}>Region</div>
+              <select value={newV.region} onChange={e=>upd("region",e.target.value)} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>
+                {REGIONS.map(r=><option key={r}>{r}</option>)}
+              </select>
+            </div>
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:11,color:"#9ca3af",marginBottom:2}}>Website Needed?</div>
+              <select value={newV.websiteNeeded} onChange={e=>upd("websiteNeeded",e.target.value)} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>
+                {["Yes","No"].map(o=><option key={o}>{o}</option>)}
+              </select>
+            </div>
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:11,color:"#9ca3af",marginBottom:2}}>Notes</div>
+              <textarea value={newV.notes} onChange={e=>upd("notes",e.target.value)} rows={3} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,resize:"vertical",boxSizing:"border-box",background:bg,color:textCol}}/>
+            </div>
+
+            <div style={{display:"flex",gap:8,marginTop:16}}>
+              <button onClick={handleSubmit} disabled={!newV.organization.trim()} style={{flex:1,padding:9,background:newV.organization.trim()?"#2563eb":"#93c5fd",color:"#fff",border:"none",borderRadius:8,fontSize:13,cursor:newV.organization.trim()?"pointer":"default",fontWeight:500}}>
+                Add Vendor
+              </button>
+              <button onClick={onClose} style={{flex:1,padding:9,background:cardBg,border:"1px solid "+borderCol,borderRadius:8,fontSize:13,cursor:"pointer",color:textCol}}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Duplicate resolution modal */}
+      {dupModal && (
+        <DuplicateResolutionModal
+          newVendor={newV}
+          duplicates={dupModal.duplicates}
+          onKeepNew={handleKeepNew}
+          onKeepExisting={handleKeepExisting}
+          onCancel={() => setDupModal(null)}
+          darkMode={darkMode}
+          cardBg={cardBg}
+          borderCol={borderCol}
+          textCol={textCol}
+          subText={subText}
+        />
+      )}
+
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+    </>
+  );
+}
+
 export default function App(){
   const [activeRegion,setActiveRegion]=useState("Atlanta");
   const [vendors,setVendors]=useState(SAMPLE);
   const [dbLoading,setDbLoading]=useState(true);
-  const [saveStatus,setSaveStatus]=useState("saved"); // "saved" | "saving" | "error"
+  const [saveStatus,setSaveStatus]=useState("saved");
   const saveTimer=useRef(null);
   const [search,setSearch]=useState("");
   const [filters,setFilters]=useState({meetingStatus:"",vendorStatus:"",websiteNeeded:"",overdue:"",organization:"",contact:"",type:""});
   const [selected,setSelected]=useState(null);
   const [editing,setEditing]=useState(null);
-  const [showAdd,setShowAdd]=useState(false);
-  const [newV,setNewV]=useState({region:"Atlanta",type:"",organization:"",contact:"",website:"",phone:"",social:"",email:"",meetingStatus:"Not Started",vendorStatus:"Prospect",websiteNeeded:"No",notes:"",partnership:"No",interactions:[],meetingDate:null,tasks:[],tags:[],statusHistory:[]});
+  const [showAdd,setShowAdd]=useState(false); // FIX #3: now controlled via button that also resets region
   const [sortField,setSortField]=useState("organization");
   const [sortDir,setSortDir]=useState("asc");
   const [view,setView]=useState("table");
@@ -724,7 +1227,6 @@ export default function App(){
   const [csvInput,setCsvInput]=useState("");
   const [showXlsx,setShowXlsx]=useState(false);
   const [showBackupReminder,setShowBackupReminder]=useState(false);
-  const [dupWarning,setDupWarning]=useState(null);
   const [selectedIds,setSelectedIds]=useState(new Set());
   const [bulkAction,setBulkAction]=useState("");
   const [bulkVal,setBulkVal]=useState("");
@@ -735,6 +1237,9 @@ export default function App(){
   const [dragColKey,setDragColKey]=useState(null);
   const [dragOverKey,setDragOverKey]=useState(null);
   const colMenuRef=useRef();useOutside(colMenuRef,()=>setShowColMenu(false));
+
+  // FIX #1 & #2: showAudit state was missing — now declared
+  const [showAudit,setShowAudit]=useState(false);
 
   // Load from Supabase on startup
   useEffect(()=>{
@@ -752,11 +1257,10 @@ export default function App(){
     const now=Date.now();
     const oneWeek=7*24*60*60*1000;
     if(!lastBackup||now-parseInt(lastBackup)>oneWeek){
-      setTimeout(()=>{
-        setShowBackupReminder(true);
-      },5000);
+      setTimeout(()=>{ setShowBackupReminder(true); },5000);
     }
   },[dbLoading]);
+
   useEffect(()=>{
     if(dbLoading) return;
     setSaveStatus("saving");
@@ -788,14 +1292,13 @@ export default function App(){
   function updateTasks(vid,tasks){setVendors(vs=>vs.map(v=>v.id===vid?{...v,tasks}:v));if(selected?.id===vid)setSelected(sv=>({...sv,tasks}));}
   function updateTags(vid,tags){setVendors(vs=>vs.map(v=>v.id===vid?{...v,tags}:v));if(selected?.id===vid)setSelected(sv=>({...sv,tags}));}
   function saveEdit(){setVendors(vs=>vs.map(v=>v.id===editing.id?editing:v));setSelected(editing);setEditing(null);}
-  function addVendor(){
-    const v=newV;
-    const dup=vendors.find(x=>x.organization.toLowerCase()===v.organization.toLowerCase()||(v.email&&x.email&&x.email.toLowerCase()===v.email.toLowerCase()));
-    if(dup&&!dupWarning){setDupWarning(dup);return;}
-    setVendors(vs=>[...vs,{...v,id:Date.now(),statusHistory:[{status:v.vendorStatus,date:nowIso()}]}]);
-    setNewV({region:activeRegion,type:"",organization:"",contact:"",website:"",phone:"",social:"",email:"",meetingStatus:"Not Started",vendorStatus:"Prospect",websiteNeeded:"No",notes:"",partnership:"No",interactions:[],meetingDate:null,tasks:[],tags:[],statusHistory:[]});
-    setShowAdd(false);setDupWarning(null);showToast("✅ Vendor added!");
+
+  // FIX #3: addVendor now uses modal — this handles the final commit
+  function handleAddVendor(v) {
+    setVendors(vs => [...vs, v]);
+    showToast("✅ Vendor added!");
   }
+
   function deleteVendor(id){setVendors(vs=>vs.filter(v=>v.id!==id));setSelected(null);}
   function handleImport(newVs){setVendors(vs=>[...vs,...newVs]);setShowXlsx(false);showToast("✅ Imported "+newVs.length+" vendors!");}
   function handleAuditApply({regionUpdates,toDelete,merges}){
@@ -829,6 +1332,8 @@ export default function App(){
       if(!obj.vendorStatus)obj.vendorStatus="Prospect";
       if(!obj.meetingStatus)obj.meetingStatus="Not Started";
       if(!obj.websiteNeeded)obj.websiteNeeded="No";
+      // FIX #5: validate region against known list
+      if(!REGIONS.includes(obj.region)) obj.region = activeRegion;
       if(obj.tags&&typeof obj.tags==="string")obj.tags=obj.tags.split("|").filter(Boolean);
       return obj;
     }).filter(v=>v.organization);
@@ -950,6 +1455,7 @@ export default function App(){
             </div>
           </div>
           <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
+            {/* FIX #3: open modal with current activeRegion pre-set */}
             {view==="table"&&<button onClick={()=>setShowAdd(true)} style={{...btnBase,background:"#2563eb",color:"#fff",borderColor:"#2563eb"}}>+ Add Vendor</button>}
             <button onClick={()=>setShowAudit(true)} style={btnBase}>🔍 Audit</button>
             <button onClick={()=>setShowXlsx(true)} style={btnBase}>📥 Import Excel</button>
@@ -1093,7 +1599,8 @@ export default function App(){
               </thead>
               <tbody>
                 {filtered.map(v=>{const sel=selected?.id===v.id;return(
-                  <tr key={v.id} onClick={()=>setSelected(v)} style={{background:sel?(darkMode?"#1e3a5f":"#eff6ff"):cardBg,cursor:"pointer"}} onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=darkMode?"#1e293b":"#f8fafc";}} onMouseLeave={e=>{e.currentTarget.style.background=sel?(darkMode?"#1e3a5f":"#eff6ff"):cardBg;}}>
+                  // FIX #4: reset detailTab to "info" when switching vendors
+                  <tr key={v.id} onClick={()=>{setSelected(v);setDetailTab("info");}} style={{background:sel?(darkMode?"#1e3a5f":"#eff6ff"):cardBg,cursor:"pointer"}} onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=darkMode?"#1e293b":"#f8fafc";}} onMouseLeave={e=>{e.currentTarget.style.background=sel?(darkMode?"#1e3a5f":"#eff6ff"):cardBg;}}>
                     <td style={{...tdS,width:32}} onClick={e=>e.stopPropagation()}><input type="checkbox" checked={selectedIds.has(v.id)} onChange={e=>{const s=new Set(selectedIds);e.target.checked?s.add(v.id):s.delete(v.id);setSelectedIds(s);}}/></td>
                     {visibleCols.map(key=>renderCell(v,key))}
                   </tr>);})}
@@ -1124,7 +1631,7 @@ export default function App(){
               <div style={{marginBottom:8}}>
                 <div style={{fontSize:11,color:subText,marginBottom:2}}>Region</div>
                 <select value={editing.region||activeRegion} onChange={e=>setEditing(ev=>({...ev,region:e.target.value}))} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>
-                  {REGIONS.map(r=>{const rc=REGION_COLORS[r];return <option key={r} value={r}>{r}</option>;})}
+                  {REGIONS.map(r=><option key={r} value={r}>{r}</option>)}
                 </select>
                 {editing.region&&editing.region!==selected?.region&&<div style={{fontSize:11,color:"#d97706",marginTop:4}}>⚠️ This will move the vendor to {editing.region}</div>}
               </div>
@@ -1168,36 +1675,21 @@ export default function App(){
         </div>}
       </div>}
 
-      {showAdd&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:50,padding:16}}>
-        <div style={{background:cardBg,borderRadius:12,width:"100%",maxWidth:440,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 20px 40px rgba(0,0,0,.2)"}}>
-          <div style={{padding:"14px 20px",borderBottom:"1px solid "+borderCol,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div style={{fontWeight:600,fontSize:15}}>Add New Vendor</div>
-            <button onClick={()=>{setShowAdd(false);setDupWarning(null);}} style={{background:"none",border:"none",fontSize:22,color:subText,cursor:"pointer"}}>×</button>
-          </div>
-          {dupWarning&&<div style={{margin:"12px 20px 0",padding:"10px 14px",background:"#fef9c3",border:"1px solid #fde68a",borderRadius:8,fontSize:13}}>
-            ⚠️ <strong>{dupWarning.organization}</strong> may already exist. <button onClick={()=>{addVendor();setDupWarning(null);}} style={{color:"#b91c1c",background:"none",border:"none",cursor:"pointer",fontWeight:600}}>Add anyway</button>
-          </div>}
-          <div style={{padding:20}}>
-            {[["Organization","organization"],["Contact Person","contact"],["Type","type"],["Website","website"],["Phone","phone"],["Social Account","social"],["Email","email"]].map(([l,k])=><Field key={k} label={l} value={newV[k]} edit onChange={val=>setNewV(n=>({...n,[k]:val}))}/>)}
-            <Field label="Meeting Status" value={newV.meetingStatus} edit options={STATUSES.meeting} onChange={val=>setNewV(n=>({...n,meetingStatus:val}))}/>
-            {(newV.meetingStatus==="Scheduled"||newV.meetingStatus==="Pending")&&<div style={{marginBottom:8}}>
-              <div style={{fontSize:11,color:subText,marginBottom:2}}>Meeting Date & Time</div>
-              <input type="datetime-local" value={toDateInput(newV.meetingDate)} onChange={e=>setNewV(n=>({...n,meetingDate:e.target.value?new Date(e.target.value).toISOString():null}))} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,boxSizing:"border-box",background:bg,color:textCol}}/>
-            </div>}
-            <Field label="Vendor Status" value={newV.vendorStatus} edit options={STATUSES.vendor} onChange={val=>setNewV(n=>({...n,vendorStatus:val}))}/>
-            <div style={{marginBottom:8}}>
-              <div style={{fontSize:11,color:subText,marginBottom:2}}>Region</div>
-              <select value={newV.region} onChange={e=>setNewV(n=>({...n,region:e.target.value}))} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>{REGIONS.map(r=><option key={r}>{r}</option>)}</select>
-            </div>
-            <Field label="Website Needed" value={newV.websiteNeeded} edit options={["Yes","No"]} onChange={val=>setNewV(n=>({...n,websiteNeeded:val}))}/>
-            <Field label="Notes" value={newV.notes} edit type="textarea" onChange={val=>setNewV(n=>({...n,notes:val}))}/>
-            <div style={{display:"flex",gap:8,marginTop:16}}>
-              <button onClick={addVendor} style={{flex:1,padding:9,background:"#2563eb",color:"#fff",border:"none",borderRadius:8,fontSize:13,cursor:"pointer",fontWeight:500}}>Add Vendor</button>
-              <button onClick={()=>{setShowAdd(false);setDupWarning(null);}} style={{flex:1,padding:9,background:cardBg,border:"1px solid "+borderCol,borderRadius:8,fontSize:13,cursor:"pointer"}}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      </div>}
+      {/* FIX #1 & #2 + new feature: AddVendorModal with autofill & dupe detection */}
+      {showAdd&&(
+        <AddVendorModal
+          onClose={()=>setShowAdd(false)}
+          onAdd={handleAddVendor}
+          vendors={vendors}
+          activeRegion={activeRegion}
+          darkMode={darkMode}
+          cardBg={cardBg}
+          borderCol={borderCol}
+          textCol={textCol}
+          subText={subText}
+          bg={bg}
+        />
+      )}
 
       {showCsv&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:50,padding:16}}>
         <div style={{background:cardBg,borderRadius:12,width:"100%",maxWidth:500,boxShadow:"0 20px 40px rgba(0,0,0,.2)"}}>
@@ -1216,6 +1708,7 @@ export default function App(){
         </div>
       </div>}
 
+      {/* FIX #1 & #2: showAudit now properly declared and used */}
       {showAudit&&<AuditModal vendors={vendors} onClose={()=>setShowAudit(false)} onApply={handleAuditApply} darkMode={darkMode} cardBg={cardBg} borderCol={borderCol} textCol={textCol} subText={subText}/>}
       {showXlsx&&<XlsxModal onClose={()=>setShowXlsx(false)} onImport={handleImport} darkMode={darkMode} cardBg={cardBg} borderCol={borderCol} textCol={textCol} subText={subText} bg={bg}/>}
       {showBackupReminder&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:500,padding:16}}>
