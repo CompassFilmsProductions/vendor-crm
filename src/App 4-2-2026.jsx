@@ -183,100 +183,62 @@ function detectRegionFromData(v) {
   }
   return null;
 }
-// Proper bigram-based string similarity (Dice coefficient on character bigrams).
-// Much more accurate than the old character-presence approach.
-// "Atlanta Catering" vs "Atlanta Florist" → ~0.55 (correctly low)
-// "Taste of Atlanta" vs "Taste of ATL"   → ~0.82 (correctly high)
-function stringSim(a, b) {
-  a = a.toLowerCase().trim();
-  b = b.toLowerCase().trim();
-  if (a === b) return 1;
-  if (a.length < 2 || b.length < 2) return 0;
-
-  // Build bigram multisets
-  const bigrams = s => {
-    const map = new Map();
-    for (let i = 0; i < s.length - 1; i++) {
-      const bg = s[i] + s[i+1];
-      map.set(bg, (map.get(bg) || 0) + 1);
-    }
-    return map;
-  };
-  const ba = bigrams(a), bb = bigrams(b);
-  let intersection = 0;
-  for (const [bg, cnt] of ba) {
-    if (bb.has(bg)) intersection += Math.min(cnt, bb.get(bg));
-  }
-  return (2 * intersection) / (a.length - 1 + b.length - 1);
+function stringSim(a,b) {
+  a=a.toLowerCase().trim();b=b.toLowerCase().trim();
+  if(a===b)return 1;
+  if(a.includes(b)||b.includes(a))return 0.9;
+  const longer=a.length>b.length?a:b,shorter=a.length>b.length?b:a;
+  let m=0;for(let i=0;i<shorter.length;i++)if(longer.includes(shorter[i]))m++;
+  return m/longer.length;
 }
 
-// Normalize a URL for comparison
-const normalizeUrl = u =>
-  (u || "").toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/^www\./, "")
-    .replace(/\/$/, "")
-    .trim();
-
-// Normalize a phone number to digits only
-const normalizePhone = p => (p || "").replace(/\D/g, "");
-
-// A name-only match needs a very high bar (≥0.92) AND the names must be
-// at least 6 chars each so short common words don't trigger false positives.
-// Hard-contact matches (email/phone/website) are always flagged regardless of name.
-function _dupReasons(a, b) {
-  const ns = stringSim(a.organization || "", b.organization || "");
-  const ap = normalizePhone(a.phone), bp = normalizePhone(b.phone);
-  const sp = ap.length >= 7 && ap === bp;   // require ≥7 digits to avoid "000" matches
-  const se = a.email && b.email && a.email.toLowerCase() === b.email.toLowerCase();
-  const aw = normalizeUrl(a.website), bw = normalizeUrl(b.website);
-  const sw = aw.length >= 4 && aw === bw;   // require non-trivial URL
-
-  const reasons = [];
-  if (se) reasons.push("Same email");
-  if (sp) reasons.push("Same phone");
-  if (sw) reasons.push("Same website");
-
-  // Name-only: require ≥0.92 similarity AND both names ≥6 chars
-  // If there's already a hard signal, lower bar to 0.80 as a corroborating signal
-  const minNameLen = Math.min((a.organization||"").length, (b.organization||"").length);
-  const hardSignal = se || sp || sw;
-  if (hardSignal && ns >= 0.80 && minNameLen >= 4) {
-    reasons.push("Similar name ("+Math.round(ns*100)+"%)");
-  } else if (!hardSignal && ns >= 0.88 && minNameLen >= 6) {
-    reasons.push("Similar name ("+Math.round(ns*100)+"%)");
-  }
-
-  const score = hardSignal ? 1 : ns;
-  return { reasons, score, hardSignal };
-}
-
+// Enhanced duplicate detection: name + phone + website
 function findDupes(vendors) {
-  const pairs = [], seen = new Set();
-  for (let i = 0; i < vendors.length; i++) {
-    for (let j = i + 1; j < vendors.length; j++) {
-      const key = vendors[i].id + "-" + vendors[j].id;
-      if (seen.has(key)) continue;
-      const { reasons, score } = _dupReasons(vendors[i], vendors[j]);
-      if (reasons.length > 0) {
+  const pairs=[],seen=new Set();
+  for(let i=0;i<vendors.length;i++){
+    for(let j=i+1;j<vendors.length;j++){
+      const key=vendors[i].id+"-"+vendors[j].id;if(seen.has(key))continue;
+      const a=vendors[i],b=vendors[j];
+      const ns=stringSim(a.organization||"",b.organization||"");
+      const sp=a.phone&&b.phone&&a.phone.replace(/\D/g,"")===b.phone.replace(/\D/g,"");
+      const se=a.email&&b.email&&a.email.toLowerCase()===b.email.toLowerCase();
+      // NEW: website match
+      const normalizeUrl = u => (u||"").toLowerCase().replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"").trim();
+      const aw=normalizeUrl(a.website), bw=normalizeUrl(b.website);
+      const sw=aw&&bw&&aw===bw;
+      const reasons=[];
+      if(se)reasons.push("Same email");
+      if(sp)reasons.push("Same phone");
+      if(sw)reasons.push("Same website");
+      if(ns>=0.85&&!se&&!sp&&!sw)reasons.push("Similar name ("+Math.round(ns*100)+"%)");
+      if(reasons.length>0){
         seen.add(key);
-        pairs.push({ a: vendors[i], b: vendors[j], reason: reasons.join(" · "), score });
+        pairs.push({a,b,reason:reasons.join(" · "),score:Math.max(ns,(se||sp||sw)?1:0)});
       }
     }
   }
-  return pairs.sort((a, b) => b.score - a.score);
+  return pairs.sort((a,b)=>b.score-a.score);
 }
 
+// Find duplicates for a single new vendor against existing list
 function findDupesForVendor(newV, vendors) {
   const results = [];
+  const normalizeUrl = u => (u||"").toLowerCase().replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/$/,"").trim();
   for (const v of vendors) {
     if (v.id === newV.id) continue;
-    const { reasons, score } = _dupReasons(newV, v);
-    if (reasons.length > 0) {
-      results.push({ vendor: v, reason: reasons.join(" · "), score });
-    }
+    const ns = stringSim(newV.organization||"", v.organization||"");
+    const sp = newV.phone && v.phone && newV.phone.replace(/\D/g,"") === v.phone.replace(/\D/g,"");
+    const se = newV.email && v.email && newV.email.toLowerCase() === v.email.toLowerCase();
+    const aw = normalizeUrl(newV.website), bw = normalizeUrl(v.website);
+    const sw = aw && bw && aw === bw;
+    const reasons = [];
+    if(se) reasons.push("Same email");
+    if(sp) reasons.push("Same phone");
+    if(sw) reasons.push("Same website");
+    if(ns >= 0.82 && !se && !sp && !sw) reasons.push("Similar name ("+Math.round(ns*100)+"%)");
+    if(reasons.length > 0) results.push({vendor: v, reason: reasons.join(" · "), score: Math.max(ns,(se||sp||sw)?1:0)});
   }
-  return results.sort((a, b) => b.score - a.score);
+  return results.sort((a,b)=>b.score-a.score);
 }
 
 const SAMPLE = [
