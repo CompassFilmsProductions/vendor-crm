@@ -190,6 +190,17 @@ function findDupes(vendors) {
   return pairs;
 }
 
+const SAMPLE = [
+  {id:1,region:"Atlanta",type:"Catering",organization:"Taste of Atlanta",contact:"James Brown",website:"tasteofatlanta.com",phone:"404-555-0101",social:"@tasteATL",email:"hello@tasteofatlanta.com",meetingStatus:"Scheduled",vendorStatus:"Commission Partner",websiteNeeded:"No",notes:"Great follow-up. Ready to partner.",partnership:"Yes",interactions:[{id:1,type:"meeting",date:new Date(Date.now()-5*86400000).toISOString()}],meetingDate:new Date(Date.now()+8*86400000).toISOString(),tasks:[{id:1,text:"Send commission agreement",done:false,due:new Date(Date.now()+3*86400000).toISOString()}],tags:["Catering","Priority"],statusHistory:[{status:"Prospect",date:new Date(Date.now()-30*86400000).toISOString()}]},
+  {id:2,region:"Atlanta",type:"Photography",organization:"Lens & Light Studio",contact:"Sara Kim",website:"lenslight.com",phone:"678-555-0234",social:"@lenslightstudio",email:"info@lenslight.com",meetingStatus:"Scheduled",vendorStatus:"Prospect",websiteNeeded:"Yes",notes:"Prefers email contact.",partnership:"No",interactions:[{id:1,type:"call",date:new Date(Date.now()-35*86400000).toISOString()}],meetingDate:new Date(Date.now()+2*86400000).toISOString(),tasks:[],tags:["Photography"],statusHistory:[{status:"Prospect",date:new Date(Date.now()-35*86400000).toISOString()}]},
+  {id:3,region:"Atlanta",type:"Florist",organization:"Bloom ATL",contact:"",website:"",phone:"770-555-0198",social:"@bloomatl",email:"bloomatl@gmail.com",meetingStatus:"Pending",vendorStatus:"Prospect",websiteNeeded:"Yes",notes:"Waiting on pricing sheet.",partnership:"No",interactions:[],meetingDate:new Date(Date.now()+5*86400000).toISOString(),tasks:[{id:1,text:"Follow up on pricing",done:false,due:new Date(Date.now()+2*86400000).toISOString()}],tags:[],statusHistory:[]},
+  {id:4,region:"Atlanta",type:"DJ/Music",organization:"SoundWave Events",contact:"DJ Marcus",website:"soundwaveevents.com",phone:"404-555-0312",social:"@soundwaveatl",email:"book@soundwaveevents.com",meetingStatus:"Completed",vendorStatus:"Preferred Vendor",websiteNeeded:"No",notes:"Signed partnership agreement.",partnership:"Yes",interactions:[{id:1,type:"meeting",date:new Date(Date.now()-2*86400000).toISOString()}],meetingDate:null,tasks:[],tags:["Music","Priority"],statusHistory:[{status:"Preferred Vendor",date:new Date(Date.now()-2*86400000).toISOString()}]},
+  {id:5,region:"Charleston",type:"Venue",organization:"The Grand Hall",contact:"Patricia Lee",website:"grandhall.com",phone:"843-555-0101",social:"",email:"events@grandhall.com",meetingStatus:"No Response",vendorStatus:"On Hold",websiteNeeded:"No",notes:"No reply after 3 attempts.",partnership:"No",interactions:[{id:1,type:"email",date:new Date(Date.now()-45*86400000).toISOString()}],meetingDate:null,tasks:[],tags:["Venue"],statusHistory:[{status:"On Hold",date:new Date(Date.now()-10*86400000).toISOString()}]},
+  {id:6,region:"Charleston",type:"Catering",organization:"Southern Bites Co.",contact:"Tony Fields",website:"southernbites.com",phone:"843-555-0234",social:"@southernbites",email:"contact@southernbites.com",meetingStatus:"Completed",vendorStatus:"Commission Partner",websiteNeeded:"No",notes:"Excellent tasting event.",partnership:"Yes",interactions:[{id:1,type:"email",date:new Date(Date.now()-8*86400000).toISOString()}],meetingDate:new Date(Date.now()+20*86400000).toISOString(),tasks:[],tags:["Catering"],statusHistory:[{status:"Commission Partner",date:new Date(Date.now()-8*86400000).toISOString()}]},
+  {id:7,region:"Savannah",type:"Videography",organization:"Frame by Frame Films",contact:"",website:"",phone:"912-555-0101",social:"@framexframe",email:"films@fbfatl.com",meetingStatus:"Not Started",vendorStatus:"Prospect",websiteNeeded:"Yes",notes:"",partnership:"No",interactions:[],meetingDate:null,tasks:[],tags:[],statusHistory:[]},
+  {id:8,region:"Savannah",type:"Décor",organization:"Elegant Touches",contact:"Monique Reyes",website:"eleganttouches.net",phone:"912-555-0234",social:"@eleganttouches",email:"info@eleganttouches.net",meetingStatus:"Scheduled",vendorStatus:"In Negotiation",websiteNeeded:"No",notes:"Referral from Southern Bites.",partnership:"No",interactions:[{id:1,type:"social",date:new Date(Date.now()-32*86400000).toISOString()}],meetingDate:new Date(Date.now()+3*86400000).toISOString(),tasks:[{id:1,text:"Review contract terms",done:false,due:null}],tags:["Décor"],statusHistory:[{status:"In Negotiation",date:new Date(Date.now()-5*86400000).toISOString()}]},
+];
+
 function HealthBar({score}){
   const color=score>=70?"#22c55e":score>=40?"#f59e0b":"#ef4444";
   return <div style={{display:"flex",alignItems:"center",gap:5}}>
@@ -425,7 +436,7 @@ function AuditModal({vendors,onClose,onApply,darkMode,cardBg,borderCol,textCol,s
     for(const flag of flags.filter(f=>f.needsLookup).slice(0,6)){
       setLookupStatus(s=>({...s,[flag.vendor.id]:"🔍 looking up…"}));
       try{
-        const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:200,messages:[{role:"user",content:'What city and state is this business in? Reply ONLY with JSON: {"city":"Atlanta","state":"GA","region":"Atlanta"} where region is one of: Atlanta, Charleston, Savannah, Nashville. If unknown set region to null.\n\nBusiness: "'+flag.vendor.organization+'"\nPhone: "'+(flag.vendor.phone||"")+'"\nWebsite: "'+(flag.vendor.website||"").slice(0,80)+'"'}],tools:[{type:"web_search_20250305",name:"web_search"}]})});
+        const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:200,messages:[{role:"user",content:'What city and state is this business in? Reply ONLY with JSON: {"city":"Atlanta","state":"GA","region":"Atlanta"} where region is one of: Atlanta, Charleston, Savannah, Nashville. If unknown set region to null.\n\nBusiness: "'+flag.vendor.organization+'"\nPhone: "'+(flag.vendor.phone||"")+'"\nWebsite: "'+(flag.vendor.website||"")+'"\nNotes: "'+(flag.vendor.notes||"").slice(0,80)+'"'}],tools:[{type:"web_search_20250305",name:"web_search"}]})});
         const data=await res.json();
         const tb=data.content?.find(b=>b.type==="text");
         if(tb){const m=tb.text.match(/\{[^}]+\}/);if(m){const p=JSON.parse(m[0]);if(p.region){
@@ -694,9 +705,9 @@ function XlsxModal({onClose,onImport,darkMode,cardBg,borderCol,textCol,subText,b
 
 export default function App(){
   const [activeRegion,setActiveRegion]=useState("Atlanta");
-  const [vendors,setVendors]=useState([]);
+  const [vendors,setVendors]=useState(SAMPLE);
   const [dbLoading,setDbLoading]=useState(true);
-  const [saveStatus,setSaveStatus]=useState("saved");
+  const [saveStatus,setSaveStatus]=useState("saved"); // "saved" | "saving" | "error"
   const saveTimer=useRef(null);
   const [search,setSearch]=useState("");
   const [filters,setFilters]=useState({meetingStatus:"",vendorStatus:"",websiteNeeded:"",overdue:"",organization:"",contact:"",type:""});
@@ -712,7 +723,6 @@ export default function App(){
   const [showCsv,setShowCsv]=useState(false);
   const [csvInput,setCsvInput]=useState("");
   const [showXlsx,setShowXlsx]=useState(false);
-  const [showAudit,setShowAudit]=useState(false);
   const [showBackupReminder,setShowBackupReminder]=useState(false);
   const [dupWarning,setDupWarning]=useState(null);
   const [selectedIds,setSelectedIds]=useState(new Set());
@@ -726,6 +736,7 @@ export default function App(){
   const [dragOverKey,setDragOverKey]=useState(null);
   const colMenuRef=useRef();useOutside(colMenuRef,()=>setShowColMenu(false));
 
+  // Load from Supabase on startup
   useEffect(()=>{
     loadFromSupabase().then(saved=>{
       if(saved?.vendors) setVendors(saved.vendors);
@@ -734,16 +745,18 @@ export default function App(){
     }).catch(()=>setDbLoading(false));
   },[]);
 
+  // Weekly backup reminder
   useEffect(()=>{
     if(dbLoading) return;
     const lastBackup=localStorage.getItem("lastBackupReminder");
     const now=Date.now();
     const oneWeek=7*24*60*60*1000;
     if(!lastBackup||now-parseInt(lastBackup)>oneWeek){
-      setTimeout(()=>setShowBackupReminder(true),5000);
+      setTimeout(()=>{
+        setShowBackupReminder(true);
+      },5000);
     }
   },[dbLoading]);
-
   useEffect(()=>{
     if(dbLoading) return;
     setSaveStatus("saving");
@@ -1111,7 +1124,7 @@ export default function App(){
               <div style={{marginBottom:8}}>
                 <div style={{fontSize:11,color:subText,marginBottom:2}}>Region</div>
                 <select value={editing.region||activeRegion} onChange={e=>setEditing(ev=>({...ev,region:e.target.value}))} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:6,padding:"4px 8px",fontSize:13,background:bg,color:textCol}}>
-                  {REGIONS.map(r=><option key={r} value={r}>{r}</option>)}
+                  {REGIONS.map(r=>{const rc=REGION_COLORS[r];return <option key={r} value={r}>{r}</option>;})}
                 </select>
                 {editing.region&&editing.region!==selected?.region&&<div style={{fontSize:11,color:"#d97706",marginTop:4}}>⚠️ This will move the vendor to {editing.region}</div>}
               </div>
@@ -1194,7 +1207,7 @@ export default function App(){
           </div>
           <div style={{padding:20}}>
             <div style={{fontSize:12,color:subText,marginBottom:8}}>Columns: organization, contact, type, phone, email, website, meetingStatus, vendorStatus, websiteNeeded, notes, region, tags</div>
-            <textarea value={csvInput} onChange={e=>setCsvInput(e.target.value)} rows={8} placeholder={"organization,contact,type\nVendor Name,Contact Person,Catering"} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:8,padding:10,fontSize:12,fontFamily:"monospace",boxSizing:"border-box",resize:"vertical",background:bg,color:textCol}}/>
+            <textarea value={csvInput} onChange={e=>setCsvInput(e.target.value)} rows={8} placeholder={"organization,contact,type\nTaste ATL,James,Catering"} style={{width:"100%",border:"1px solid "+borderCol,borderRadius:8,padding:10,fontSize:12,fontFamily:"monospace",boxSizing:"border-box",resize:"vertical",background:bg,color:textCol}}/>
             <div style={{display:"flex",gap:8,marginTop:12}}>
               <button onClick={importCSV} style={{flex:1,padding:9,background:"#2563eb",color:"#fff",border:"none",borderRadius:8,fontSize:13,cursor:"pointer",fontWeight:500}}>Import</button>
               <button onClick={()=>setShowCsv(false)} style={{flex:1,padding:9,background:cardBg,border:"1px solid "+borderCol,borderRadius:8,fontSize:13,cursor:"pointer"}}>Cancel</button>
